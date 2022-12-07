@@ -1,4 +1,5 @@
 # data and output 
+*.idea
 *.png
 *.nc
 # Byte-compiled / optimized / DLL files

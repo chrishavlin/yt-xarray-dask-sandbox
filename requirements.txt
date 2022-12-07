@@ -1,0 +1,6 @@
+yt>=4.1.0
+jupyterlab
+matplotlib
+xarray
+netcdf4
+dask[complete]
