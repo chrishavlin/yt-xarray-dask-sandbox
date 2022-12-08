@@ -3,20 +3,13 @@ import xarray as xr
 import numpy as np
 import os
 import shutil
-
-# !!!!! note, NEED TO IMPORT the following TO AVOID SEGFAULT!!!! 
-# I think cause if we dont, the different dask processes 
-# will import. and import order when both h5py and netCDF4 
-# are around can result in weird bugs. Not entirely sure if this is 
-# user error or a bug. May also be version dependent as I 
-# dont see it on my desktop, only in a fresh environment
-# on my laptop.
-import h5py
-import netCDF4
+from dask.distributed import Client
 
 # build a parallel netcdf dataset. each .nc file is a different part of the grid.
 # grid is uniform (though varies in x, y, z), with no refinement (yt level 0 only)
 # uses dask to build sample data on each grid, write to nc
+# note, might be able to simplify this with xrarray save_mfdataset, but
+# its nice to have a general solution too...
 
 def _build_write_chunk(chunk_bbox, chunk_sizes, outfile):
 
@@ -25,13 +18,20 @@ def _build_write_chunk(chunk_bbox, chunk_sizes, outfile):
     zcoords = np.linspace(chunk_bbox[2][0], chunk_bbox[2][1], chunk_sizes[2])
 
     x_vals, y_vals, z_vals = np.meshgrid(xcoords, ycoords, zcoords, indexing="ij")
+
+    center = [3., 3., 3.]
+    dist = np.sqrt((x_vals - center[0])**2 +
+                   (y_vals - center[1])**2 +
+                   (z_vals - center[2])**2)
+    gauss = np.exp(-(dist/1.)**2) + np.random.rand(*chunk_sizes)*0.1
+    coord_tup = ("x", "y", "z")
     x1 = xr.Dataset(
         {
-            "temperature": (
-            ("x", "y", "z"), 20 * np.random.rand(*chunk_sizes)),
-            "xvals": (("x", "y", "z"), x_vals,),
-            "yvals": (("x", "y", "z"), y_vals,),
-            "zvals": (("x", "y", "z"), z_vals,),
+            "temperature": (coord_tup, 20 * np.random.rand(*chunk_sizes)),
+            "gauss": (coord_tup, gauss),
+            "xvals": (coord_tup, x_vals,),
+            "yvals": (coord_tup, y_vals,),
+            "zvals": (coord_tup, z_vals,),
 
         },
         coords={"x": xcoords, "y": ycoords, "z": zcoords},
@@ -43,7 +43,7 @@ def build_test_data(n_grids_xyz=None,
                     cells_per_grid_xyz=None, 
                     output_dir=None, 
                     clear_output_dir=False, 
-                    use_dask = False):
+                    dask_client: Client = None):
 
     if n_grids_xyz is None:
         n_grids_xyz = (5, 5, 5)
@@ -69,7 +69,8 @@ def build_test_data(n_grids_xyz=None,
     hwidth = cell_sizes / 2
 
     igrid_index = 0
-    write_grids = []
+    fwrites = []  # future writes
+    filelist = []
     for igrid_x in range(n_grids_xyz[0]):
         for igrid_y in range(n_grids_xyz[1]):
             for igrid_z in range(n_grids_xyz[2]):
@@ -78,23 +79,26 @@ def build_test_data(n_grids_xyz=None,
                 right_edge = left_edge + grid_wids_xyz - cell_sizes
                 this_grid = np.column_stack([left_edge, right_edge])
 
-#                if igrid_index == 0:
-#                    # ug, actuall, need this for a jupyter notebook. wtfffffff.
-#                    new_fi = os.path.join(output_dir, "_temp_.nc")
-#                    _build_write_chunk(this_grid, np.array([2,2,2]), new_fi)
-
                 new_file = os.path.join(output_dir,
                                         f"chunk_{igrid_index}.nc")
-                if use_dask is False:
+                filelist.append(new_file)
+                if dask_client is None:
                     _build_write_chunk(this_grid, cells_per_grid_xyz, new_file)
                 else:
-                    write_grids.append(
-                        dask.delayed(_build_write_chunk)(this_grid, cells_per_grid_xyz,
-                                                    new_file))
+                    fwrites.append(dask_client.submit(_build_write_chunk,
+                                       this_grid,
+                                       cells_per_grid_xyz,
+                                        new_file
+                                       ))
                 igrid_index += 1
 
+    if len(fwrites) > 0:
+        _ = dask_client.gather(fwrites)
+        # make sure all the files are there
+        missing_files = [fi for fi in filelist if os.path.isfile(fi) is False]
+        if len(missing_files) > 0:
+            raise RuntimeError(f"Some files were not written: {missing_files}")
 
-    if use_dask:
-        results = dask.compute(*write_grids)
+    print("Finished data construction.")
 
 
